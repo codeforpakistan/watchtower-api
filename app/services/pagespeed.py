@@ -3,6 +3,7 @@ import asyncio
 from typing import Dict, Optional, Any
 from urllib.parse import quote
 from app.core.config import settings
+from app.services.carbon_footprint import CarbonFootprintCalculator
 import logging
 
 logger = logging.getLogger(__name__)
@@ -11,6 +12,7 @@ class PageSpeedInsights:
     def __init__(self):
         self.api_key = settings.GOOGLE_PAGESPEED_API_KEY
         self.base_url = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+        self.carbon_calculator = CarbonFootprintCalculator()
         
     async def check_url_accessibility(self, url: str) -> bool:
         """Check if URL is accessible before making API call"""
@@ -133,9 +135,10 @@ class PageSpeedInsights:
                     "num_fonts": audits.get('diagnostics', {}).get('details', {}).get('items', [{}])[0].get('numFonts') if audits.get('diagnostics') else None,
                 },
                 
-                # Carbon footprint estimation (based on page weight and data transfer)
-                "environmental_impact": self._estimate_carbon_footprint(
-                    audits.get('total-byte-weight', {}).get('numericValue', 0)
+                # Enhanced carbon footprint calculation
+                "environmental_impact": self._calculate_enhanced_carbon_footprint(
+                    audits.get('total-byte-weight', {}).get('numericValue', 0),
+                    audits.get('server-response-time', {}).get('numericValue')
                 ),
             }
             
@@ -148,23 +151,48 @@ class PageSpeedInsights:
             logger.error(f"Error analyzing {url}: {e}")
             return None
     
-    def _estimate_carbon_footprint(self, total_bytes: int) -> Dict[str, float]:
+    def _calculate_enhanced_carbon_footprint(
+        self, 
+        total_bytes: int, 
+        server_response_time_ms: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
-        Estimate carbon footprint based on page weight
-        Using averages: 0.81g CO2 per GB transferred
+        Calculate enhanced carbon footprint using the dedicated carbon service
         """
         if not total_bytes:
-            return {"co2_grams": 0.0, "total_mb": 0.0, "energy_kwh": 0.0}
+            return {
+                "co2_grams": 0.0, 
+                "total_mb": 0.0, 
+                "energy_kwh": 0.0,
+                "rating": "A+",
+                "recommendations": []
+            }
             
-        total_mb = total_bytes / (1024 * 1024)
-        total_gb = total_mb / 1024
-        co2_grams = total_gb * 0.81
-        energy_kwh = total_gb * 0.0003  # Rough estimate
+        # Use the dedicated carbon footprint calculator
+        footprint = self.carbon_calculator.calculate_website_footprint(
+            page_size_bytes=total_bytes,
+            server_response_time_ms=server_response_time_ms
+        )
+        
+        # Get comparison data
+        comparison = self.carbon_calculator.compare_with_average(footprint)
         
         return {
-            "co2_grams": round(co2_grams, 4),
-            "total_mb": round(total_mb, 2),
-            "energy_kwh": round(energy_kwh, 6) if energy_kwh > 0 else 0.0,
+            "co2_grams": footprint.total_co2_grams,
+            "total_mb": footprint.data_transfer_mb,
+            "energy_kwh": footprint.energy_kwh,
+            "rating": comparison["rating"],
+            "percentile": comparison["percentile"],
+            "breakdown": {
+                "data_transfer": footprint.data_transfer_co2,
+                "server_processing": footprint.server_processing_co2,
+                "network_transmission": footprint.network_transmission_co2,
+                "end_user_device": footprint.end_user_device_co2
+            },
+            "vs_average_website": comparison["vs_average_website"],
+            "recommendations": footprint.recommendations[:3],  # Top 3 recommendations
+            "confidence_level": footprint.confidence_level,
+            "methodology": footprint.methodology
         }
     
     async def analyze_both_strategies(self, url: str) -> Dict[str, Any]:

@@ -43,7 +43,7 @@ class SSLChecker:
             "url": url,
             "hostname": hostname,
             "port": port,
-            "scan_date": datetime.datetime.utcnow().isoformat(),
+            "scan_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "https_redirect": https_redirect,
             "certificate": cert_info,
             "ssl_configuration": ssl_config,
@@ -132,21 +132,22 @@ class SSLChecker:
             # Connect and get certificate
             with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                    cert_der = ssock.getpeercert_chain()[0]
+                    # Get certificate in DER format
+                    cert_der = ssock.getpeercert(binary_form=True)
                     cert = x509.load_der_x509_certificate(cert_der, default_backend())
                     
-                    # Basic certificate info
-                    cert_info["valid_from"] = cert.not_valid_before.isoformat()
-                    cert_info["valid_until"] = cert.not_valid_after.isoformat()
+                    # Basic certificate info - use UTC timezone-aware versions
+                    cert_info["valid_from"] = cert.not_valid_before_utc.isoformat()
+                    cert_info["valid_until"] = cert.not_valid_after_utc.isoformat()
                     
                     # Check if certificate is valid (not expired)
-                    now = datetime.datetime.utcnow()
-                    if cert.not_valid_before <= now <= cert.not_valid_after:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    if cert.not_valid_before_utc <= now <= cert.not_valid_after_utc:
                         cert_info["valid"] = True
                         cert_info["expired"] = False
                         
                     # Days until expiry
-                    days_until_expiry = (cert.not_valid_after - now).days
+                    days_until_expiry = (cert.not_valid_after_utc - now).days
                     cert_info["days_until_expiry"] = days_until_expiry
                     
                     # Certificate details
@@ -170,8 +171,11 @@ class SSLChecker:
                     except x509.ExtensionNotFound:
                         pass
                     
-                    # Certificate chain length
-                    cert_info["certificate_chain_length"] = len(ssock.getpeercert_chain())
+                    # Certificate chain length (try to get if available)
+                    try:
+                        cert_info["certificate_chain_length"] = len(ssock.getpeercert_chain())
+                    except AttributeError:
+                        cert_info["certificate_chain_length"] = 1  # At least the server cert
                     
         except ssl.SSLError as e:
             cert_info["errors"].append(f"SSL Error: {str(e)}")
@@ -197,34 +201,35 @@ class SSLChecker:
             "renegotiation_secure": True
         }
         
-        # Test different TLS versions
-        protocols_to_test = [
-            ("SSLv2", ssl.PROTOCOL_SSLv23),  # Will be rejected by modern systems
-            ("SSLv3", ssl.PROTOCOL_SSLv23),  # Will be rejected by modern systems  
-            ("TLSv1.0", ssl.PROTOCOL_TLSv1),
-            ("TLSv1.1", ssl.PROTOCOL_TLSv1_1),
-            ("TLSv1.2", ssl.PROTOCOL_TLSv1_2),
-            ("TLSv1.3", ssl.PROTOCOL_TLS),
-        ]
-        
-        for protocol_name, protocol in protocols_to_test:
-            try:
-                context = ssl.SSLContext(protocol)
-                context.set_ciphers('ALL:@SECLEVEL=0')  # Allow all ciphers for testing
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                
-                with socket.create_connection((hostname, port), timeout=5) as sock:
-                    with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                        ssl_config["protocols_supported"].append(protocol_name)
+        # Test TLS configuration by connecting and checking the negotiated protocol
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((hostname, port), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    # Get the negotiated protocol version
+                    protocol_version = ssock.version()
+                    if protocol_version:
+                        ssl_config["protocols_supported"].append(protocol_version)
                         
                         # Mark vulnerable protocols
-                        if protocol_name in ["SSLv2", "SSLv3", "TLSv1.0", "TLSv1.1"]:
-                            ssl_config["vulnerable_protocols"].append(protocol_name)
+                        if protocol_version in ["SSLv2", "SSLv3", "TLSv1", "TLSv1.1"]:
+                            ssl_config["vulnerable_protocols"].append(protocol_version)
+                    
+                    # Get cipher info
+                    cipher = ssock.cipher()
+                    if cipher:
+                        ssl_config["ciphers_supported"].append(cipher[0])
+                        
+                        # Check for weak ciphers (basic check)
+                        cipher_name = cipher[0].lower()
+                        if any(weak in cipher_name for weak in ['rc4', 'md5', 'des']):
+                            ssl_config["weak_ciphers"].append(cipher[0])
                             
-            except Exception:
-                # Protocol not supported (which is good for old protocols)
-                pass
+        except Exception as e:
+            logger.debug(f"SSL configuration check failed for {hostname}:{port}: {e}")
         
         return ssl_config
     
