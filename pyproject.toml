@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "watchtower-api"
+version = "0.1.0"
+description = "API for monitoring government website performance and quality"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.14"
+fastapi = "^0.116.1"
+dspy = "^3.0.1"
+httpx = "^0.28.1"
+pydantic-settings = "^2.10.1"
+cryptography = "^45.0.6"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+pytest-asyncio = "^1.1.0"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (may require API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
