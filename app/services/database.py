@@ -2,6 +2,7 @@ from typing import List, Dict, Optional, Any
 import uuid
 from datetime import datetime
 from app.core.config import settings
+from supabase import create_client, Client
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,19 +13,34 @@ class DatabaseService:
     def __init__(self):
         self.supabase_url = settings.SUPABASE_URL
         self.supabase_key = settings.SUPABASE_KEY
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
         
     async def get_all_websites(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """Get all websites from the database"""
-        # This will be implemented using MCP calls
-        return []
+        try:
+            query = self.supabase.table('websites').select('*').order('name')
+            
+            if active_only:
+                query = query.eq('is_active', True)
+                
+            response = query.execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Failed to fetch websites: {e}")
+            return []
     
     async def get_website_by_id(self, website_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific website by ID"""
-        return None
+        try:
+            response = self.supabase.table('websites').select('*').eq('id', website_id).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            logger.error(f"Failed to fetch website {website_id}: {e}")
+            return None
     
     async def get_websites_for_crawling(self) -> List[Dict[str, Any]]:
         """Get all active websites that need to be crawled"""
-        return []
+        return await self.get_all_websites(active_only=True)
     
     async def store_analysis_report(
         self,
@@ -115,16 +131,48 @@ class DatabaseService:
             'raw_carbon_data': carbon_data
         }
         
-        # This will be implemented using MCP calls
-        return str(uuid.uuid4())
+        try:
+            # Insert the report data
+            response = self.supabase.table('reports').insert(report_data).execute()
+            
+            if response.data:
+                report_id = response.data[0]['id']
+                logger.info(f"Stored analysis report {report_id} for website {website_id}")
+                return report_id
+            else:
+                logger.error(f"Failed to store report for website {website_id}")
+                return str(uuid.uuid4())  # Fallback ID
+                
+        except Exception as e:
+            logger.error(f"Error storing report for website {website_id}: {e}")
+            return str(uuid.uuid4())  # Fallback ID
     
     async def get_latest_reports(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get latest reports across all websites"""
-        return []
+        try:
+            response = self.supabase.table('reports')\
+                .select('*, websites(name, url)')\
+                .order('scan_date', desc=True)\
+                .limit(limit)\
+                .execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Failed to fetch latest reports: {e}")
+            return []
     
     async def get_website_reports(self, website_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get reports for a specific website"""
-        return []
+        try:
+            response = self.supabase.table('reports')\
+                .select('*')\
+                .eq('website_id', website_id)\
+                .order('scan_date', desc=True)\
+                .limit(limit)\
+                .execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Failed to fetch reports for website {website_id}: {e}")
+            return []
     
     async def get_leaderboard(
         self, 
@@ -133,29 +181,126 @@ class DatabaseService:
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """
-        Get leaderboard of government websites
-        
-        Args:
-            sort_by: 'overall_score', 'performance_score', 'ssl_security_score', etc.
-            government_level: Filter by 'federal', 'state', 'local'
-            limit: Number of results to return
+        Get leaderboard of government websites with their latest scores
         """
-        return []
+        try:
+            # Get latest report for each website using a subquery approach
+            # This is a complex query, so we'll use RPC or raw SQL if needed
+            
+            # For now, let's use a simpler approach - get all websites and their latest reports
+            websites = await self.get_all_websites(active_only=True)
+            leaderboard = []
+            
+            for website in websites:
+                if government_level and website.get('government_level') != government_level:
+                    continue
+                
+                # Get latest report for this website
+                reports = await self.get_website_reports(website['id'], limit=1)
+                
+                if reports:
+                    report = reports[0]
+                    leaderboard.append({
+                        **website,
+                        'latest_report': report,
+                        'overall_score': report.get('overall_score', 0),
+                        'performance_score': report.get('performance_score', 0),
+                        'ssl_security_score': report.get('ssl_security_score', 0),
+                        'scan_date': report.get('scan_date')
+                    })
+            
+            # Sort by the specified column
+            leaderboard.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
+            
+            return leaderboard[:limit]
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch leaderboard: {e}")
+            return []
     
     async def get_shame_wall(self, severity: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get websites that are shame-worthy"""
-        return []
+        try:
+            # Get leaderboard and filter for shame-worthy sites
+            leaderboard = await self.get_leaderboard(sort_by='overall_score', limit=100)
+            
+            shame_wall = []
+            for entry in leaderboard:
+                report = entry.get('latest_report', {})
+                if report.get('shame_worthy'):
+                    if not severity or report.get('ssl_shame_severity') == severity:
+                        shame_wall.append({
+                            **entry,
+                            'shame_reasons': self._get_shame_reasons(report)
+                        })
+            
+            return shame_wall
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch shame wall: {e}")
+            return []
     
     async def get_website_statistics(self) -> Dict[str, Any]:
         """Get overall statistics about monitored websites"""
-        return {
-            'total_websites': 0,
-            'total_reports': 0,
-            'average_overall_score': 0,
-            'shame_worthy_count': 0,
-            'ssl_issues_count': 0,
-            'latest_scan_date': None
-        }
+        try:
+            # Get basic counts
+            websites = await self.get_all_websites(active_only=False)
+            active_websites = [w for w in websites if w.get('is_active', True)]
+            
+            # Get reports statistics
+            latest_reports = await self.get_latest_reports(limit=1000)  # Get more for stats
+            
+            shame_worthy_count = len([r for r in latest_reports if r.get('shame_worthy')])
+            ssl_issues_count = len([r for r in latest_reports if not r.get('ssl_valid')])
+            
+            # Calculate average scores
+            valid_scores = [r.get('overall_score', 0) for r in latest_reports if r.get('overall_score', 0) > 0]
+            avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+            
+            # Get latest scan date
+            latest_scan = max([r.get('scan_date') for r in latest_reports if r.get('scan_date')], default=None)
+            
+            return {
+                'total_websites': len(websites),
+                'active_websites': len(active_websites),
+                'total_reports': len(latest_reports),
+                'average_overall_score': round(avg_score, 2),
+                'shame_worthy_count': shame_worthy_count,
+                'ssl_issues_count': ssl_issues_count,
+                'latest_scan_date': latest_scan
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch statistics: {e}")
+            return {
+                'total_websites': 0,
+                'total_reports': 0,
+                'average_overall_score': 0,
+                'shame_worthy_count': 0,
+                'ssl_issues_count': 0,
+                'latest_scan_date': None
+            }
+    
+    def _get_shame_reasons(self, report: Dict[str, Any]) -> List[str]:
+        """Extract shame reasons from a report"""
+        reasons = []
+        
+        if report.get('ssl_expired'):
+            reasons.append("Expired SSL certificate")
+        elif not report.get('ssl_valid'):
+            reasons.append("Invalid SSL certificate")
+        elif not report.get('https_enforced'):
+            reasons.append("HTTPS not enforced")
+            
+        performance = report.get('performance_score', 100)
+        if performance < 30:
+            reasons.append(f"Very poor performance ({performance}/100)")
+            
+        accessibility = report.get('accessibility_score', 100)
+        if accessibility < 50:
+            reasons.append(f"Poor accessibility ({accessibility}/100)")
+            
+        return reasons
     
     def _calculate_overall_score(
         self, 
