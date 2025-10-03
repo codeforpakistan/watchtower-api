@@ -52,3 +52,4 @@ build/
 # 
 .mcp.json
 scripts/
+oauth2.keys.json

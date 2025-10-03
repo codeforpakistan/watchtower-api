@@ -20,7 +20,8 @@ class WatchtowerCrawler:
         self.pagespeed = PageSpeedInsights()
         self.ssl_checker = SSLChecker()
         self.db = DatabaseService()
-        self.max_concurrent = settings.MAX_CONCURRENT_SCANS
+        # Note: We scan websites sequentially to respect PageSpeed API limits
+        # Setting max_concurrent is kept for future use if needed
         
     async def crawl_all_websites(self, strategy: str = "mobile") -> Dict[str, Any]:
         """
@@ -48,38 +49,39 @@ class WatchtowerCrawler:
             }
         
         logger.info(f"Found {len(websites)} websites to crawl")
-        
-        # Process websites in batches to respect rate limits
+
+        # Process websites ONE AT A TIME to respect Google PageSpeed API limits
+        # PageSpeed Insights has strict rate limits and doesn't like concurrent requests
         results = []
         errors = []
-        
-        # Create semaphore to limit concurrent requests
-        semaphore = asyncio.Semaphore(self.max_concurrent)
-        
-        async def crawl_single_website(website: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-            """Crawl a single website with semaphore protection"""
-            async with semaphore:
-                try:
-                    return await self.analyze_website(website, strategy)
-                except Exception as e:
-                    error_msg = f"Failed to crawl {website.get('url', 'unknown')}: {str(e)}"
-                    logger.error(error_msg)
+        successful_results = []
+
+        # Process websites sequentially
+        for index, website in enumerate(websites, 1):
+            try:
+                logger.info(f"📊 Scanning {index}/{len(websites)}: {website.get('name', 'Unknown')} ({website.get('url', '')})")
+
+                result = await self.analyze_website(website, strategy)
+
+                if result:
+                    successful_results.append(result)
+                    logger.info(f"✅ {index}/{len(websites)} completed successfully")
+                else:
+                    error_msg = f"Failed to crawl {website.get('url', 'unknown')}: Analysis returned None"
+                    logger.warning(error_msg)
                     errors.append(error_msg)
-                    return None
-        
-        # Create tasks for all websites
-        tasks = [crawl_single_website(website) for website in websites]
-        
-        # Execute all tasks
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Filter out None results and exceptions
-        successful_results = [r for r in results if r is not None and not isinstance(r, Exception)]
-        
-        # Log exceptions
-        for result in results:
-            if isinstance(result, Exception):
-                errors.append(str(result))
+
+                # Add a delay between requests to be respectful of API limits
+                # Only delay if there are more websites to scan
+                if index < len(websites):
+                    delay = 2  # 2 seconds between scans
+                    logger.info(f"⏳ Waiting {delay}s before next scan...")
+                    await asyncio.sleep(delay)
+
+            except Exception as e:
+                error_msg = f"Failed to crawl {website.get('url', 'unknown')}: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
         
         end_time = datetime.utcnow()
         duration = (end_time - start_time).total_seconds()

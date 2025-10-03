@@ -72,12 +72,12 @@ class DatabaseService:
             'strategy': strategy,
             'scan_date': datetime.utcnow().isoformat(),
             
-            # PageSpeed scores
-            'performance_score': pagespeed_data.get('scores', {}).get('performance'),
-            'accessibility_score': pagespeed_data.get('scores', {}).get('accessibility'),
-            'best_practices_score': pagespeed_data.get('scores', {}).get('best_practices'),
-            'seo_score': pagespeed_data.get('scores', {}).get('seo'),
-            'pwa_score': pagespeed_data.get('scores', {}).get('pwa'),
+            # PageSpeed scores (convert to integers, database expects int)
+            'performance_score': int(round(pagespeed_data.get('scores', {}).get('performance', 0))),
+            'accessibility_score': int(round(pagespeed_data.get('scores', {}).get('accessibility', 0))),
+            'best_practices_score': int(round(pagespeed_data.get('scores', {}).get('best_practices', 0))),
+            'seo_score': int(round(pagespeed_data.get('scores', {}).get('seo', 0))),
+            'pwa_score': int(round(pagespeed_data.get('scores', {}).get('pwa', 0))),
             
             # Core Web Vitals (field data)
             'lcp_field': pagespeed_data.get('field_data', {}).get('largest_contentful_paint'),

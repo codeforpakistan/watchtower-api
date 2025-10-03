@@ -58,7 +58,7 @@ class PageSpeedInsights:
             # Add delay to respect rate limits
             await asyncio.sleep(1)
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 response = await client.get(api_endpoint)
                 response.raise_for_status()
                 data = response.json()
@@ -135,10 +135,11 @@ class PageSpeedInsights:
                     "num_fonts": audits.get('diagnostics', {}).get('details', {}).get('items', [{}])[0].get('numFonts') if audits.get('diagnostics') else None,
                 },
                 
-                # Enhanced carbon footprint calculation
+                # Enhanced carbon footprint calculation (website-wide)
                 "environmental_impact": self._calculate_enhanced_carbon_footprint(
                     audits.get('total-byte-weight', {}).get('numericValue', 0),
-                    audits.get('server-response-time', {}).get('numericValue')
+                    audits.get('server-response-time', {}).get('numericValue'),
+                    url
                 ),
             }
             
@@ -152,37 +153,49 @@ class PageSpeedInsights:
             return None
     
     def _calculate_enhanced_carbon_footprint(
-        self, 
-        total_bytes: int, 
-        server_response_time_ms: Optional[float] = None
+        self,
+        total_bytes: int,
+        server_response_time_ms: Optional[float] = None,
+        url: str = ""
     ) -> Dict[str, Any]:
         """
         Calculate enhanced carbon footprint using the dedicated carbon service
+        NOW INCLUDES WEBSITE-WIDE ESTIMATION (not just single page)
         """
         if not total_bytes:
             return {
-                "co2_grams": 0.0, 
-                "total_mb": 0.0, 
+                "co2_grams": 0.0,
+                "total_mb": 0.0,
                 "energy_kwh": 0.0,
                 "rating": "A+",
-                "recommendations": []
+                "recommendations": [],
+                "estimated_pages": 0
             }
-            
-        # Use the dedicated carbon footprint calculator
+
+        # Estimate number of pages on the website
+        estimated_pages = self.carbon_calculator.estimate_website_pages(url, total_bytes)
+
+        # Calculate with website-wide scaling
+        # Assume average of 10,000 monthly visitors for government sites
+        # This gives us a realistic per-visit carbon footprint
         footprint = self.carbon_calculator.calculate_website_footprint(
             page_size_bytes=total_bytes,
-            server_response_time_ms=server_response_time_ms
+            server_response_time_ms=server_response_time_ms,
+            monthly_visitors=10000,  # Estimated average for gov sites
+            estimated_pages=estimated_pages,
+            pages_per_visit=3.0  # Users typically visit 3 pages
         )
-        
+
         # Get comparison data
         comparison = self.carbon_calculator.compare_with_average(footprint)
-        
+
         return {
             "co2_grams": footprint.total_co2_grams,
             "total_mb": footprint.data_transfer_mb,
             "energy_kwh": footprint.energy_kwh,
             "rating": comparison["rating"],
             "percentile": comparison["percentile"],
+            "estimated_pages": estimated_pages,
             "breakdown": {
                 "data_transfer": footprint.data_transfer_co2,
                 "server_processing": footprint.server_processing_co2,
@@ -190,9 +203,10 @@ class PageSpeedInsights:
                 "end_user_device": footprint.end_user_device_co2
             },
             "vs_average_website": comparison["vs_average_website"],
-            "recommendations": footprint.recommendations[:3],  # Top 3 recommendations
+            "recommendations": footprint.recommendations[:5],  # Top 5 recommendations
             "confidence_level": footprint.confidence_level,
-            "methodology": footprint.methodology
+            "methodology": footprint.methodology,
+            "note": f"Estimated for entire website (~{estimated_pages} pages, 3 pages/visit)"
         }
     
     async def analyze_both_strategies(self, url: str) -> Dict[str, Any]:
